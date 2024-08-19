@@ -8,7 +8,7 @@ from __future__ import annotations
 import torch
 
 import omni.isaac.lab.sim as sim_utils
-from omni.isaac.lab.assets import Articulation, ArticulationCfg, RigidObject, RigidObjectCfg
+from omni.isaac.lab.assets import Articulation, ArticulationCfg
 from omni.isaac.lab.envs import DirectRLEnv, DirectRLEnvCfg
 from omni.isaac.lab.envs.ui import BaseEnvWindow
 from omni.isaac.lab.markers import VisualizationMarkers
@@ -85,35 +85,12 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     )
 
     # scene
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4, env_spacing=2.5, replicate_physics=True) # original num_envs=4096
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=2.5, replicate_physics=True)
 
     # robot
     robot: ArticulationCfg = CRAZYFLIE_CFG.replace(prim_path="/World/envs/env_.*/Robot")
     thrust_to_weight = 1.9
     moment_scale = 0.01
-
-    # obstacle
-    # spawn a blue sphere with colliders and rigid body
-    # working
-    # obstacle = sim_utils.SphereCfg(
-    #     radius=0.05,
-    #     rigid_props=sim_utils.RigidBodyPropertiesCfg(disable_gravity=True),
-    #     mass_props=sim_utils.MassPropertiesCfg(mass=1.0),
-    #     collision_props=sim_utils.CollisionPropertiesCfg(),
-    #     visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 0.0, 1.0)),
-    # )
-    obstacle = RigidObjectCfg(
-        prim_path="/World/envs/env_.*/Sphere",
-        spawn=sim_utils.SphereCfg(
-            radius=0.1,
-            # height=0.02,
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(disable_gravity=True),
-            mass_props=sim_utils.MassPropertiesCfg(mass=1.0),
-            collision_props=sim_utils.CollisionPropertiesCfg(),
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 0.0, 1.0), metallic=0.2),
-        ),
-        init_state=RigidObjectCfg.InitialStateCfg(),
-    )
 
     # reward scales
     lin_vel_reward_scale = -0.05
@@ -156,33 +133,9 @@ class QuadcopterEnv(DirectRLEnv):
         self._robot = Articulation(self.cfg.robot)
         self.scene.articulations["robot"] = self._robot
 
-
-        # obstacle
-        # self.obstacle = self.cfg.obstacle.func(
-        #    "/World/Objects/SphereRigid", self.cfg.obstacle, translation=(-0.2, 0.0, 2.0), orientation=(0.5, 0.0, 0.5, 0.0)
-        # )
-        self._obstacle = RigidObject(self.cfg.obstacle)
-        self.scene.rigid_objects["obstacle"] = self._obstacle
-        # obstacle like robot 
-        # self._obstacle = RigidObject(self.cfg.obstacle)
-        # self.scene.rigid_objects["obstacle"] = self._obstacle
-
-
-        # self.scene.articulations["obstacle"] = self.obstacle
-        # self.scene.cfg_sphere_rigid.num_envs = self.scene.cfg.num_envs
-        # self.scene.articulations["cfg_sphere_rigid"] = self._cfg_sphere_rigid
-        # self._cfg_sphere_rigid = self.cfg.cfg_sphere_rigid.class_type(self.cfg.cfg_sphere_rigid)
-        
-        # these 2 lines working but not able to copy obstacle across all environments
-        # self.cfg.obstacle.num_envs = self.scene.cfg.num_envs
-        # self.cfg.obstacle.env_spacing = self.scene.cfg.env_spacing 
-        
-        # self.scene.rigid_objects["obstacle"] = self.obstacle        # trial not working
-
-        self.cfg.terrain.num_envs = self.scene.cfg.num_envs    
+        self.cfg.terrain.num_envs = self.scene.cfg.num_envs
         self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
         self._terrain = self.cfg.terrain.class_type(self.cfg.terrain)
-        
         # clone, filter, and replicate
         self.scene.clone_environments(copy_from_source=False)
         self.scene.filter_collisions(global_prim_paths=[self.cfg.terrain.prim_path])
@@ -277,7 +230,7 @@ class QuadcopterEnv(DirectRLEnv):
         self._robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
 
     def _set_debug_vis_impl(self, debug_vis: bool):
-        # create markers if necessary for the first time
+        # create markers if necessary for the first tome
         if debug_vis:
             if not hasattr(self, "goal_pos_visualizer"):
                 marker_cfg = CUBOID_MARKER_CFG.copy()
