@@ -112,7 +112,8 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
             collision_props=sim_utils.CollisionPropertiesCfg(),
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 0.0, 1.0), metallic=0.2),
         ),
-        init_state=RigidObjectCfg.InitialStateCfg(),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(1.0, 1.0, 1.0)), 
+        # change this initial position relative to marker and reinstantiate again as env resets
     )
 
     # reward scales
