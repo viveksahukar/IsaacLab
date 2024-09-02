@@ -8,7 +8,7 @@ from __future__ import annotations
 import torch
 
 import omni.isaac.lab.sim as sim_utils
-from omni.isaac.lab.assets import Articulation, ArticulationCfg
+from omni.isaac.lab.assets import Articulation, ArticulationCfg, RigidObject, RigidObjectCfg
 from omni.isaac.lab.envs import DirectRLEnv, DirectRLEnvCfg
 from omni.isaac.lab.envs.ui import BaseEnvWindow
 from omni.isaac.lab.markers import VisualizationMarkers
@@ -85,17 +85,33 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     )
 
     # scene
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=2.5, replicate_physics=True)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=2.5, replicate_physics=True) # original num_envs=4096
 
     # robot
     robot: ArticulationCfg = CRAZYFLIE_CFG.replace(prim_path="/World/envs/env_.*/Robot")
     thrust_to_weight = 1.9
     moment_scale = 0.01
 
+    # obstacle
+    obstacle = RigidObjectCfg(
+        prim_path="/World/envs/env_.*/Sphere",
+        spawn=sim_utils.SphereCfg(
+            radius=0.1,
+            # height=0.02,
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(disable_gravity=True),
+            mass_props=sim_utils.MassPropertiesCfg(mass=1.0),
+            collision_props=sim_utils.CollisionPropertiesCfg(),
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 0.0, 1.0), metallic=0.2),
+        ),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(1.0, 1.0, 1.0)), 
+        # change this initial position relative to marker and reinstantiate again as env resets
+    )
+
     # reward scales
     lin_vel_reward_scale = -0.05
     ang_vel_reward_scale = -0.01
     distance_to_goal_reward_scale = 15.0
+    distance_to_obstacle_reward_scale = -10.0
 
 
 class QuadcopterEnv(DirectRLEnv):
@@ -103,6 +119,10 @@ class QuadcopterEnv(DirectRLEnv):
 
     def __init__(self, cfg: QuadcopterEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
+
+        # Initialize attributes
+        # self.distance_to_obstacle = torch.tensor(0.0, device=self.device)
+
 
         # Total thrust and moment applied to the base of the quadcopter
         self._actions = torch.zeros(self.num_envs, self.cfg.num_actions, device=self.device)
@@ -118,6 +138,7 @@ class QuadcopterEnv(DirectRLEnv):
                 "lin_vel",
                 "ang_vel",
                 "distance_to_goal",
+                "distance_to_obstacle",
             ]
         }
         # Get specific body indices
@@ -132,10 +153,14 @@ class QuadcopterEnv(DirectRLEnv):
     def _setup_scene(self):
         self._robot = Articulation(self.cfg.robot)
         self.scene.articulations["robot"] = self._robot
+        self._obstacle = RigidObject(self.cfg.obstacle)
+        self.scene.rigid_objects["obstacle"] = self._obstacle
+  
 
-        self.cfg.terrain.num_envs = self.scene.cfg.num_envs
+        self.cfg.terrain.num_envs = self.scene.cfg.num_envs    
         self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
         self._terrain = self.cfg.terrain.class_type(self.cfg.terrain)
+        
         # clone, filter, and replicate
         self.scene.clone_environments(copy_from_source=False)
         self.scene.filter_collisions(global_prim_paths=[self.cfg.terrain.prim_path])
@@ -172,10 +197,42 @@ class QuadcopterEnv(DirectRLEnv):
         ang_vel = torch.sum(torch.square(self._robot.data.root_ang_vel_b), dim=1)
         distance_to_goal = torch.linalg.norm(self._desired_pos_w - self._robot.data.root_pos_w, dim=1)
         distance_to_goal_mapped = 1 - torch.tanh(distance_to_goal / 0.8)
+
+        # Calculate distance to obstacle
+        # print("shape of obstacle position:", self._obstacle.data.body_pos_w[:, 0, :].shape)
+        # print("obstacle position:", self._obstacle.data.body_pos_w[:, 0, :])
+        # print("shape of robot position:", self._robot.data.root_pos_w.shape)
+        # print("robot position:", self._robot.data.root_pos_w)
+        distance_to_obstacle = torch.linalg.norm(self._obstacle.data.body_pos_w[:, 0, :] - self._robot.data.root_pos_w, dim=1)
+        distance_to_obstacle = torch.tensor(distance_to_obstacle, device=self.device)
+
+        # print("Distance to obstacle:", self.distance_to_obstacle)
+        # print("Distance to obstacle shape:", self.distance_to_obstacle.shape)
+        # Map the distance to the obstacle using a tanh function
+        distance_to_obstacle_mapped = 1 - torch.tanh(distance_to_obstacle / 0.8)
+
+          # Safe distance from obstacle
+        # Define a penalty based on proximity to the obstacle
+        # self.safe_distance = 0.25  # Safe distance from obstacle
+        # obstacle_penalty = torch.where(
+        #     self.distance_to_obstacle < self.safe_distance,
+        #     -self.cfg.distance_to_obstacle_reward_scale * (self.safe_distance - self.distance_to_obstacle),
+        #     torch.zeros_like(self.distance_to_obstacle)
+        # )
+        # Define a penalty using the mapped distance
+        # obstacle_penalty = -self.cfg.distance_to_obstacle_reward_scale * distance_to_obstacle_mapped
+        # dg = distance_to_goal_mapped * self.cfg.distance_to_goal_reward_scale * self.step_dt
+        # do = distance_to_obstacle_mapped * self.cfg.distance_to_obstacle_reward_scale * self.step_dt
+        # print("Distance to goal:", dg)
+        # print("Distance to obstacle:", do)
+        # print("dg shape:", dg.shape)
+        # print("do shape:", do.shape)
         rewards = {
             "lin_vel": lin_vel * self.cfg.lin_vel_reward_scale * self.step_dt,
             "ang_vel": ang_vel * self.cfg.ang_vel_reward_scale * self.step_dt,
             "distance_to_goal": distance_to_goal_mapped * self.cfg.distance_to_goal_reward_scale * self.step_dt,
+            "distance_to_obstacle": distance_to_obstacle_mapped * self.cfg.distance_to_obstacle_reward_scale * self.step_dt,
+            # "obstacle_penalty": obstacle_penalty * self.step_dt  # Add the obstacle penalty
         }
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
         # Logging
@@ -185,7 +242,29 @@ class QuadcopterEnv(DirectRLEnv):
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
-        died = torch.logical_or(self._robot.data.root_pos_w[:, 2] < 0.1, self._robot.data.root_pos_w[:, 2] > 2.0)
+        
+        distance_to_obstacle = torch.linalg.norm(self._obstacle.data.body_pos_w[:, 0, :] - self._robot.data.root_pos_w, dim=1)
+        distance_to_obstacle = torch.tensor(distance_to_obstacle, device=self.device)
+        safe_distance = torch.tensor(0.15, device=self.device)
+
+        # print("Shape of condition 1:", (self._robot.data.root_pos_w[:, 2] < 0.1).shape)
+        # print("Shape of condition 2:", (self._robot.data.root_pos_w[:, 2] > 2.0).shape)
+        # print("Shape of condition 3:", (distance_to_obstacle < safe_distance).shape)
+        # print("shape of obstacle distance:", distance_to_obstacle.shape)
+        # print("shape of safe distance:", safe_distance.shape)
+        # print("obstacle distance:", distance_to_obstacle)
+        # print("safe_distance:", safe_distance)
+        # print("output of condition 1:", self._robot.data.root_pos_w[:, 2] < 0.1)
+        # print("output of condition 2:", self._robot.data.root_pos_w[:, 2] > 2.0)
+        # print("output of condition 3:", distance_to_obstacle < safe_distance)
+        
+        conditions = torch.stack([
+            self._robot.data.root_pos_w[:, 2] < 0.1,
+            self._robot.data.root_pos_w[:, 2] > 2.0,
+            distance_to_obstacle < safe_distance
+        ], dim=0)
+        died = torch.any(conditions, dim=0)
+
         return died, time_out
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
@@ -210,16 +289,39 @@ class QuadcopterEnv(DirectRLEnv):
         self.extras["log"].update(extras)
 
         self._robot.reset(env_ids)
+        self._obstacle.reset(env_ids)
         super()._reset_idx(env_ids)
         if len(env_ids) == self.num_envs:
             # Spread out the resets to avoid spikes in training when many environments reset at a similar time
             self.episode_length_buf = torch.randint_like(self.episode_length_buf, high=int(self.max_episode_length))
 
         self._actions[env_ids] = 0.0
-        # Sample new commands
+
+        # Sample new goal position
         self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2]).uniform_(-2.0, 2.0)
         self._desired_pos_w[env_ids, :2] += self._terrain.env_origins[env_ids, :2]
         self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2]).uniform_(0.5, 1.5)
+        
+        # Set obstacle position relative to the new goal position
+        obstacle_offset = torch.tensor([0.5, 0.5, 0.5], device=self.device)  # Example offset vector
+        new_obstacle_position = self._desired_pos_w[env_ids] + obstacle_offset
+        
+        # Debug: Print before updating position
+        # print("Before update:", self._obstacle.data.body_pos_w[env_ids, 0, :])
+
+        # Update the obstacle's initial state
+        
+        self._obstacle.data.body_pos_w[env_ids, 0, :] = new_obstacle_position[0]
+
+        # print("shape of robot position", self._robot.data.root_pos_w.shape)
+        # print("shape of goal position", self._desired_pos_w.shape)
+        # print("shape of obstacle position", self._obstacle.data.body_pos_w.shape)
+
+        # Debug: Print after updating position
+        # print("After update:", self._obstacle.data.body_pos_w[env_ids, 0, :])
+
+        #FIX, BUT OK: visulization of the obstacle position update not happening, but update is happening
+
         # Reset robot state
         joint_pos = self._robot.data.default_joint_pos[env_ids]
         joint_vel = self._robot.data.default_joint_vel[env_ids]
@@ -230,7 +332,7 @@ class QuadcopterEnv(DirectRLEnv):
         self._robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
 
     def _set_debug_vis_impl(self, debug_vis: bool):
-        # create markers if necessary for the first tome
+        # create markers if necessary for the first time
         if debug_vis:
             if not hasattr(self, "goal_pos_visualizer"):
                 marker_cfg = CUBOID_MARKER_CFG.copy()
