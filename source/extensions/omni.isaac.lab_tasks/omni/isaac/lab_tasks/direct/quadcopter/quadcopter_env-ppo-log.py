@@ -24,10 +24,6 @@ from omni.isaac.lab.utils.math import subtract_frame_transforms
 from omni.isaac.lab_assets import CRAZYFLIE_CFG  # isort: skip
 from omni.isaac.lab.markers import CUBOID_MARKER_CFG  # isort: skip
 
-########################################################################
-## modified from the obstacle added to the original quadcopter_env.py
-########################################################################
-
 
 class QuadcopterEnvWindow(BaseEnvWindow):
     """Window manager for the Quadcopter environment."""
@@ -109,16 +105,13 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
         ),
         init_state=RigidObjectCfg.InitialStateCfg(pos=(1.0, 1.0, 1.0)), 
         # change this initial position relative to marker and reinstantiate again as env resets
-        # init_state=RigidObjectCfg.InitialStateCfg(pos=(np.random.uniform(-1.0, 1.0), np.random.uniform(-1.0, 1.0), 1.0)),
     )
 
     # reward scales
     lin_vel_reward_scale = -0.05
     ang_vel_reward_scale = -0.01
     distance_to_goal_reward_scale = 15.0
-    distance_to_obstacle_reward_scale = -5.0 # previously -10.0
-    danger_zone_violation_reward_scale = -10.0  # Negative reward for entering danger zone
-
+    distance_to_obstacle_reward_scale = -10.0
 
 
 class QuadcopterEnv(DirectRLEnv):
@@ -138,10 +131,6 @@ class QuadcopterEnv(DirectRLEnv):
         # Goal position
         self._desired_pos_w = torch.zeros(self.num_envs, 3, device=self.device)
 
-        # Danger zone violation tracking
-        self.danger_zone_violation_count = 0  # Initialize the counter
-        self.in_danger_zone = torch.zeros(self.num_envs, device=self.device)  # Track whether the agent is in the danger zone
-
         # Logging
         self._episode_sums = {
             key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
@@ -152,7 +141,6 @@ class QuadcopterEnv(DirectRLEnv):
                 "distance_to_obstacle",
                 "distance_to_goal_raw",
                 "distance_to_obstacle_raw",
-                "danger_zone_penalty",
             ]
         }
         # Get specific body indices
@@ -194,17 +182,12 @@ class QuadcopterEnv(DirectRLEnv):
         desired_pos_b, _ = subtract_frame_transforms(
             self._robot.data.root_state_w[:, :3], self._robot.data.root_state_w[:, 3:7], self._desired_pos_w
         )
-
-        # distance_to_obstacle = torch.linalg.norm(self._obstacle.data.body_pos_w[:, 0, :] - self._robot.data.root_pos_w, dim=1)
-        # distance_to_obstacle = torch.tensor(distance_to_obstacle, device=self.device) # check if you need to apply unsqueeze(-1)
-
         obs = torch.cat(
             [
                 self._robot.data.root_lin_vel_b,
                 self._robot.data.root_ang_vel_b,
                 self._robot.data.projected_gravity_b,
                 desired_pos_b,
-                # distance_to_obstacle.unsqueeze(-1) #check if this causes any error in dimension mismatch otherwise apply .unsqueeze(-1)
             ],
             dim=-1,
         )
@@ -212,41 +195,36 @@ class QuadcopterEnv(DirectRLEnv):
         return observations
 
     def _get_rewards(self) -> torch.Tensor:
-        # MODIFY#
-
         lin_vel = torch.sum(torch.square(self._robot.data.root_lin_vel_b), dim=1)
         ang_vel = torch.sum(torch.square(self._robot.data.root_ang_vel_b), dim=1)
         distance_to_goal = torch.linalg.norm(self._desired_pos_w - self._robot.data.root_pos_w, dim=1)
         distance_to_goal_mapped = 1 - torch.tanh(distance_to_goal / 0.8)
 
         distance_to_obstacle = torch.linalg.norm(self._obstacle.data.body_pos_w[:, 0, :] - self._robot.data.root_pos_w, dim=1)
-        distance_to_obstacle = distance_to_obstacle.clone().detach().to(self.device) # check if you need to apply unsqueeze(-1)
-
+        distance_to_obstacle = torch.tensor(distance_to_obstacle, device=self.device)
         distance_to_obstacle_mapped = 1 - torch.tanh(distance_to_obstacle / 0.8)
 
-        # Check if the agent is entering the danger zone
-        safe_distance = 0.2  # Define the safe distance around the obstacle (danger zone)
-        danger_zone_violation = (distance_to_obstacle < safe_distance).float()  # C(s, a) = 1 if within danger zone
+        # rewards = {
+        #     "lin_vel": lin_vel * self.cfg.lin_vel_reward_scale * self.step_dt,
+        #     "ang_vel": ang_vel * self.cfg.ang_vel_reward_scale * self.step_dt,
+        #     "distance_to_goal": distance_to_goal_mapped * self.cfg.distance_to_goal_reward_scale * self.step_dt,
+        #     "distance_to_obstacle": distance_to_obstacle_mapped * self.cfg.distance_to_obstacle_reward_scale * self.step_dt,
+        #     "distance_to_goal_raw": distance_to_goal,
+        #     "distance_to_obstacle_raw": distance_to_obstacle,
+        #     # "obstacle_penalty": obstacle_penalty * self.step_dt  # Add the obstacle penalty
+        # }
+        # reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
 
-        # Soft violation penalty: Apply fixed negative reward only once when entering the danger zone
-        penalty = torch.where(
-            (danger_zone_violation == 1) & (self.in_danger_zone == 0),  # Apply only when entering the danger zone
-            self.cfg.danger_zone_violation_reward_scale * danger_zone_violation,
-            torch.zeros_like(danger_zone_violation)
-        )
-        
-        # Track the number of times the agent enters the danger zone
-        self.danger_zone_violation_count += (danger_zone_violation == 1).float().sum().item()
+        # # Logging
+        # for key, value in rewards.items():
+        #     self._episode_sums[key] += value
 
-        # Update the danger zone status (set to 1 if agent is inside, 0 if outside)
-        self.in_danger_zone = danger_zone_violation
-
+        # Define the reward values that contribute to the agent's reward
         reward_values = {
             "lin_vel": lin_vel * self.cfg.lin_vel_reward_scale * self.step_dt,
             "ang_vel": ang_vel * self.cfg.ang_vel_reward_scale * self.step_dt,
             "distance_to_goal": distance_to_goal_mapped * self.cfg.distance_to_goal_reward_scale * self.step_dt,
             "distance_to_obstacle": distance_to_obstacle_mapped * self.cfg.distance_to_obstacle_reward_scale * self.step_dt,
-            "danger_zone_penalty": penalty * self.step_dt  # Add the scaled danger zone penalty if violated
         }
 
         # Define logging values (raw distances), used only for logging purposes
@@ -262,6 +240,7 @@ class QuadcopterEnv(DirectRLEnv):
         for key, value in {**reward_values, **logging_values}.items():
             self._episode_sums[key] += value  # This logs both rewards and raw distances
 
+
         # Log average distance to goal and obstacle
         avg_distance_to_goal = torch.mean(distance_to_goal).item()
         avg_distance_to_obstacle = torch.mean(distance_to_obstacle).item()
@@ -271,15 +250,20 @@ class QuadcopterEnv(DirectRLEnv):
         if hasattr(self, 'logger'):
             self.logger.add_scalar("Metrics/Avg_Distance_To_Goal", avg_distance_to_goal, self.global_step)
             self.logger.add_scalar("Metrics/Avg_Distance_To_Obstacle", avg_distance_to_obstacle, self.global_step)
-
+        
         return reward
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
         
+        distance_to_obstacle = torch.linalg.norm(self._obstacle.data.body_pos_w[:, 0, :] - self._robot.data.root_pos_w, dim=1)
+        distance_to_obstacle = torch.tensor(distance_to_obstacle, device=self.device)
+        safe_distance = torch.tensor(0.15, device=self.device)
+        
         conditions = torch.stack([
             self._robot.data.root_pos_w[:, 2] < 0.1,
             self._robot.data.root_pos_w[:, 2] > 2.0,
+            distance_to_obstacle < safe_distance
         ], dim=0)
         died = torch.any(conditions, dim=0)
 
@@ -289,20 +273,7 @@ class QuadcopterEnv(DirectRLEnv):
         if env_ids is None or len(env_ids) == self.num_envs:
             env_ids = self._robot._ALL_INDICES
 
-        # Initialize the extras dictionary to store episode metrics
-        extras = dict()
-
-        distance_to_obstacle = torch.linalg.norm(self._obstacle.data.body_pos_w[:, 0, :] - self._robot.data.root_pos_w, dim=1)
-        distance_to_obstacle = distance_to_obstacle.clone().detach().to(self.device)
-
-        # Logging for danger zone violations and distance to obstacle
-        extras["Safety/danger_zone_violations"] = self.danger_zone_violation_count
-        extras["Safety/distance_to_obstacle_mean"] = torch.mean(distance_to_obstacle[env_ids]).item()
-
-        # Reset danger zone violation count for the new episode
-        self.danger_zone_violation_count = 0
-
-        # Logging episodic reward metrics
+        # Logging
         final_distance_to_goal = torch.linalg.norm(
             self._desired_pos_w[env_ids] - self._robot.data.root_pos_w[env_ids], dim=1
         ).mean()
@@ -312,49 +283,47 @@ class QuadcopterEnv(DirectRLEnv):
             self._obstacle.data.body_pos_w[env_ids, 0, :] - self._robot.data.root_pos_w[env_ids], dim=1
         ).mean()
 
+        extras = dict()
+
         for key in self._episode_sums.keys():
             episodic_sum_avg = torch.mean(self._episode_sums[key][env_ids])
             extras["Episode_Reward/" + key] = episodic_sum_avg / self.max_episode_length_s
             self._episode_sums[key][env_ids] = 0.0
 
-        # Logging episode termination metrics
+        ## original extras code ##
+        # self.extras["log"] = dict()
+        # self.extras["log"].update(extras)
+        # extras = dict()
+        ## original extras code ##
+
         extras["Episode_Termination/died"] = torch.count_nonzero(self.reset_terminated[env_ids]).item()
         extras["Episode_Termination/time_out"] = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
         extras["Metrics/final_distance_to_goal"] = final_distance_to_goal.item()
         extras["Metrics/final_distance_to_obstacle"] = final_distance_to_obstacle.item()
 
-        # Update the log dictionary with the extras
-        # if "log" not in self.extras:
-        #     self.extras["log"] = dict()
-        # self.extras["log"].update(extras)
+        # self.extras["log"].update(extras)          ## original extras code ##
         self.extras["log"] = extras
-        
-        # Reset robot and obstacle
+
         self._robot.reset(env_ids)
         self._obstacle.reset(env_ids)
-
-        # Call the superclass reset
         super()._reset_idx(env_ids)
 
-        # Spread out the resets to avoid spikes in training when many environments reset at a similar time
         if len(env_ids) == self.num_envs:
+            # Spread out the resets to avoid spikes in training when many environments reset at a similar time
             self.episode_length_buf = torch.randint_like(self.episode_length_buf, high=int(self.max_episode_length))
 
-        # Reset actions for the selected environments
         self._actions[env_ids] = 0.0
 
         # Sample new goal position
         self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2]).uniform_(-2.0, 2.0)
         self._desired_pos_w[env_ids, :2] += self._terrain.env_origins[env_ids, :2]
         self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2]).uniform_(0.5, 1.5)
-
+        
         # Set obstacle position relative to the new goal position
-        obstacle_offset = torch.tensor([0.5, 0.5, 0.5], device=self.device)
-        # obstacle_offset = torch.randn(3, device=self.device) * 0.5  # Optional randomization
+        obstacle_offset = torch.tensor([0.5, 0.5, 0.5], device=self.device)  # Example offset vector
         new_obstacle_position = self._desired_pos_w[env_ids] + obstacle_offset
-
-        # Update the obstacle's initial state
-        self._obstacle.data.body_pos_w[env_ids, 0, :] = new_obstacle_position
+        
+        self._obstacle.data.body_pos_w[env_ids, 0, :] = new_obstacle_position[0]
 
         # Reset robot state
         joint_pos = self._robot.data.default_joint_pos[env_ids]
@@ -364,9 +333,6 @@ class QuadcopterEnv(DirectRLEnv):
         self._robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
         self._robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
         self._robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
-
-
-        # obstacle_offset = torch.tensor([0.5, 0.5, 0.5], device=self.device)  # Example offset vector
 
     def _set_debug_vis_impl(self, debug_vis: bool):
         # create markers if necessary for the first time

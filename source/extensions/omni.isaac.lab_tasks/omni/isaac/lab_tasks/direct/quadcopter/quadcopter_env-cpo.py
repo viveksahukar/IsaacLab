@@ -150,8 +150,6 @@ class QuadcopterEnv(DirectRLEnv):
                 "ang_vel",
                 "distance_to_goal",
                 "distance_to_obstacle",
-                "distance_to_goal_raw",
-                "distance_to_obstacle_raw",
                 "danger_zone_penalty",
             ]
         }
@@ -241,37 +239,18 @@ class QuadcopterEnv(DirectRLEnv):
         # Update the danger zone status (set to 1 if agent is inside, 0 if outside)
         self.in_danger_zone = danger_zone_violation
 
-        reward_values = {
+        rewards = {
             "lin_vel": lin_vel * self.cfg.lin_vel_reward_scale * self.step_dt,
             "ang_vel": ang_vel * self.cfg.ang_vel_reward_scale * self.step_dt,
             "distance_to_goal": distance_to_goal_mapped * self.cfg.distance_to_goal_reward_scale * self.step_dt,
             "distance_to_obstacle": distance_to_obstacle_mapped * self.cfg.distance_to_obstacle_reward_scale * self.step_dt,
             "danger_zone_penalty": penalty * self.step_dt  # Add the scaled danger zone penalty if violated
         }
-
-        # Define logging values (raw distances), used only for logging purposes
-        logging_values = {
-            "distance_to_goal_raw": distance_to_goal,
-            "distance_to_obstacle_raw": distance_to_obstacle,
-        }
-
-        # Calculate the total reward by summing only the reward values
-        reward = torch.sum(torch.stack(list(reward_values.values())), dim=0)
+        reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
 
         # Logging
-        for key, value in {**reward_values, **logging_values}.items():
-            self._episode_sums[key] += value  # This logs both rewards and raw distances
-
-        # Log average distance to goal and obstacle
-        avg_distance_to_goal = torch.mean(distance_to_goal).item()
-        avg_distance_to_obstacle = torch.mean(distance_to_obstacle).item()
-
-        # Assuming you have a logging mechanism (e.g., TensorBoard or CSV)
-        # Log values per timestep
-        if hasattr(self, 'logger'):
-            self.logger.add_scalar("Metrics/Avg_Distance_To_Goal", avg_distance_to_goal, self.global_step)
-            self.logger.add_scalar("Metrics/Avg_Distance_To_Obstacle", avg_distance_to_obstacle, self.global_step)
-
+        for key, value in rewards.items():
+            self._episode_sums[key] += value
         return reward
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
@@ -307,11 +286,6 @@ class QuadcopterEnv(DirectRLEnv):
             self._desired_pos_w[env_ids] - self._robot.data.root_pos_w[env_ids], dim=1
         ).mean()
 
-        # Calculate final average distance to obstacle
-        final_distance_to_obstacle = torch.linalg.norm(
-            self._obstacle.data.body_pos_w[env_ids, 0, :] - self._robot.data.root_pos_w[env_ids], dim=1
-        ).mean()
-
         for key in self._episode_sums.keys():
             episodic_sum_avg = torch.mean(self._episode_sums[key][env_ids])
             extras["Episode_Reward/" + key] = episodic_sum_avg / self.max_episode_length_s
@@ -321,14 +295,12 @@ class QuadcopterEnv(DirectRLEnv):
         extras["Episode_Termination/died"] = torch.count_nonzero(self.reset_terminated[env_ids]).item()
         extras["Episode_Termination/time_out"] = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
         extras["Metrics/final_distance_to_goal"] = final_distance_to_goal.item()
-        extras["Metrics/final_distance_to_obstacle"] = final_distance_to_obstacle.item()
 
         # Update the log dictionary with the extras
-        # if "log" not in self.extras:
-        #     self.extras["log"] = dict()
-        # self.extras["log"].update(extras)
-        self.extras["log"] = extras
-        
+        if "log" not in self.extras:
+            self.extras["log"] = dict()
+        self.extras["log"].update(extras)
+
         # Reset robot and obstacle
         self._robot.reset(env_ids)
         self._obstacle.reset(env_ids)
