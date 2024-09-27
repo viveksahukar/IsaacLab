@@ -1,4 +1,4 @@
-![Isaac Lab](docs/source/_static/isaaclab.jpg)
+
 
 ---
 
