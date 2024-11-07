@@ -40,8 +40,10 @@ def class_to_dict(obj: object) -> dict[str, Any]:
     # convert object to dictionary
     if isinstance(obj, dict):
         obj_dict = obj
-    else:
+    elif hasattr(obj, "__dict__"):
         obj_dict = obj.__dict__
+    else:
+        return obj
 
     # convert to dictionary
     data = dict()
@@ -55,6 +57,8 @@ def class_to_dict(obj: object) -> dict[str, Any]:
         # check if attribute is a dictionary
         elif hasattr(value, "__dict__") or isinstance(value, dict):
             data[key] = class_to_dict(value)
+        elif isinstance(value, (list, tuple)):
+            data[key] = type(value)([class_to_dict(v) for v in value])
         else:
             data[key] = value
     return data
@@ -95,6 +99,16 @@ def update_class_from_dict(obj, data: dict[str, Any], _ns: str = "") -> None:
                     )
                 if isinstance(obj_mem, tuple):
                     value = tuple(value)
+                else:
+                    set_obj = True
+                    # recursively call if iterable contains dictionaries
+                    for i in range(len(obj_mem)):
+                        if isinstance(value[i], dict):
+                            update_class_from_dict(obj_mem[i], value[i], _ns=key_ns)
+                            set_obj = False
+                    # do not set value to obj, otherwise it overwrites the cfg class with the dict
+                    if not set_obj:
+                        continue
             elif callable(obj_mem):
                 # update function name
                 value = string_to_callable(value)

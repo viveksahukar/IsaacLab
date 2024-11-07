@@ -6,6 +6,7 @@
 """Sub-module that provides a wrapper around the Python 3.7 onwards ``dataclasses`` module."""
 
 import inspect
+import types
 from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import MISSING, Field, dataclass, field, replace
@@ -13,7 +14,7 @@ from typing import Any, ClassVar
 
 from .dict import class_to_dict, update_class_from_dict
 
-_CONFIGCLASS_METHODS = ["to_dict", "from_dict", "replace", "copy"]
+_CONFIGCLASS_METHODS = ["to_dict", "from_dict", "replace", "copy", "validate"]
 """List of class methods added at runtime to dataclass."""
 
 """
@@ -97,6 +98,7 @@ def configclass(cls, **kwargs):
     setattr(cls, "from_dict", _update_class_from_dict)
     setattr(cls, "replace", _replace_class_with_kwargs)
     setattr(cls, "copy", _copy_class)
+    setattr(cls, "validate", _validate)
     # wrap around dataclass
     cls = dataclass(cls, **kwargs)
     # return wrapped class
@@ -239,6 +241,56 @@ def _add_annotation_types(cls):
     cls.__annotations__ = hints
 
 
+def _validate(obj: object, prefix: str = "") -> list[str]:
+    """Check the validity of configclass object.
+
+    This function checks if the object is a valid configclass object. A valid configclass object contains no MISSING
+    entries.
+
+    Args:
+        obj: The object to check.
+        prefix: The prefix to add to the missing fields. Defaults to ''.
+
+    Returns:
+        A list of missing fields.
+
+    Raises:
+        TypeError: When the object is not a valid configuration object.
+    """
+    missing_fields = []
+
+    if type(obj) is type(MISSING):
+        missing_fields.append(prefix)
+        return missing_fields
+    elif isinstance(obj, (list, tuple)):
+        for index, item in enumerate(obj):
+            current_path = f"{prefix}[{index}]"
+            missing_fields.extend(_validate(item, prefix=current_path))
+        return missing_fields
+    elif isinstance(obj, dict):
+        obj_dict = obj
+    elif hasattr(obj, "__dict__"):
+        obj_dict = obj.__dict__
+    else:
+        return missing_fields
+
+    for key, value in obj_dict.items():
+        # disregard builtin attributes
+        if key.startswith("__"):
+            continue
+        current_path = f"{prefix}.{key}" if prefix else key
+        missing_fields.extend(_validate(value, prefix=current_path))
+
+    # raise an error only once at the top-level call
+    if prefix == "" and missing_fields:
+        formatted_message = "\n".join(f"  - {field}" for field in missing_fields)
+        raise TypeError(
+            f"Missing values detected in object {obj.__class__.__name__} for the following"
+            f" fields:\n{formatted_message}\n"
+        )
+    return missing_fields
+
+
 def _process_mutable_types(cls):
     """Initialize all mutable elements through :obj:`dataclasses.Field` to avoid unnecessary complaints.
 
@@ -333,8 +385,10 @@ def _custom_post_init(obj):
             continue
         # get data member
         value = getattr(obj, key)
-        # duplicate data members
-        if not callable(value):
+        # check annotation
+        ann = obj.__class__.__dict__.get(key)
+        # duplicate data members that are mutable
+        if not callable(value) and not isinstance(ann, property):
             setattr(obj, key, deepcopy(value))
 
 
@@ -371,6 +425,7 @@ def _skippable_class_member(key: str, value: Any, hints: dict | None = None) -> 
     * Manually-added special class functions: From :obj:`_CONFIGCLASS_METHODS`.
     * Members that are already present in the type annotations.
     * Functions bounded to class object or class.
+    * Properties bounded to class object.
 
     Args:
         key: The class member name.
@@ -392,9 +447,17 @@ def _skippable_class_member(key: str, value: Any, hints: dict | None = None) -> 
         return True
     # skip functions bounded to class
     if callable(value):
+        # FIXME: This doesn't yet work for static methods because they are essentially seen as function types.
+        # check for class methods
+        if isinstance(value, types.MethodType):
+            return True
+        # check for instance methods
         signature = inspect.signature(value)
         if "self" in signature.parameters or "cls" in signature.parameters:
             return True
+    # skip property methods
+    if isinstance(value, property):
+        return True
     # Otherwise, don't skip
     return False
 
